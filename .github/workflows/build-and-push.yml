@@ -1,0 +1,62 @@
+name: Build and Push Docker Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'The name of the application to build (e.g., redis)'
+        required: true
+        type: string
+      app_version:
+        description: 'The major version of the application (e.g., 8.0)'
+        required: true
+        type: string
+      distro_version:
+        description: 'The distribution version (e.g., debian-12)'
+        required: true
+        default: 'debian-12'
+        type: string
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract App Version from Dockerfile
+        id: extract_version
+        run: |
+          DOCKERFILE_PATH="bitnami/${{ inputs.app_name }}/${{ inputs.app_version }}/${{ inputs.distro_version }}/Dockerfile"
+          if [ ! -f "$DOCKERFILE_PATH" ]; then
+            echo "Dockerfile not found at $DOCKERFILE_PATH"
+            exit 1
+          fi
+          APP_VERSION=$(grep 'ENV APP_VERSION' "$DOCKERFILE_PATH" | cut -d '"' -f 2)
+          echo "app_full_version=${APP_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        id: build_and_push
+        uses: docker/build-push-action@v5
+        with:
+          context: bitnami/${{ inputs.app_name }}/${{ inputs.app_version }}/${{ inputs.distro_version }}/
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/bitnami-${{ inputs.app_name }}:${{ steps.extract_version.outputs.app_full_version }}-${{ inputs.distro_version }}
+
+      - name: Create and push Git tag
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          GIT_TAG="${{ inputs.app_name }}-${{ steps.extract_version.outputs.app_full_version }}-${{ inputs.distro_version }}"
+          echo "Creating git tag: $GIT_TAG"
+          git tag "$GIT_TAG"
+          git push origin "$GIT_TAG"
