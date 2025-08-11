@@ -44,19 +44,56 @@ jobs:
           APP_VERSION=$(grep 'ENV APP_VERSION' "$DOCKERFILE_PATH" | cut -d '"' -f 2)
           echo "app_full_version=${APP_VERSION}" >> $GITHUB_OUTPUT
 
+      - name: Compute next release revision suffix (-rN) from Git and Docker Hub
+        id: compute_revision
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          set -euo pipefail
+          APP="${{ inputs.app_name }}"
+          VERSION="${{ steps.extract_version.outputs.app_full_version }}"
+          DISTRO="${{ inputs.distro_version }}"
+
+          # Ensure we have all tags from origin (do not fail if shallow)
+          git fetch --tags --force >/dev/null 2>&1 || true
+
+          # Compute max N from Git tags: <app>-<version>-<distro>-rN
+          GIT_MAX=$(git tag --list "${APP}-${VERSION}-${DISTRO}-r*" | grep -Eo 'r[0-9]+$' | cut -c2- | sort -n | tail -1 || echo 0)
+          if [[ -z "${GIT_MAX}" ]]; then GIT_MAX=0; fi
+
+          # Compute max N from Docker Hub tags: <version>-<distro>-rN
+          DOCKER_MAX=0
+          REPO="${DOCKERHUB_USERNAME}/bitnami-${APP}"
+          JSON="$(curl -fsSL "https://hub.docker.com/v2/repositories/${REPO}/tags?page_size=100" || true)"
+          if [[ -n "$JSON" ]]; then
+            # Extract all tag names and find matches
+            while IFS= read -r NAME; do
+              if [[ "$NAME" =~ ^${VERSION}-${DISTRO}-r([0-9]+)$ ]]; then
+                N="${BASH_REMATCH[1]}"
+                if (( N > DOCKER_MAX )); then DOCKER_MAX=$N; fi
+              fi
+            done < <(echo "$JSON" | tr -d ' \n' | grep -oE '"name":"[^"]+"' | sed -E 's/^"name":"([^"]+)"$/\1/')
+          fi
+
+          # Take the max and set next as r(N+1)
+          MAX=$GIT_MAX
+          if (( DOCKER_MAX > MAX )); then MAX=$DOCKER_MAX; fi
+          NEXT=$((MAX + 1))
+          echo "rev_suffix=-r${NEXT}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push Docker image
         id: build_and_push
         uses: docker/build-push-action@v5
         with:
           context: bitnami/${{ inputs.app_name }}/${{ inputs.app_version }}/${{ inputs.distro_version }}/
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/bitnami-${{ inputs.app_name }}:${{ steps.extract_version.outputs.app_full_version }}-${{ inputs.distro_version }}
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/bitnami-${{ inputs.app_name }}:${{ steps.extract_version.outputs.app_full_version }}-${{ inputs.distro_version }}${{ steps.compute_revision.outputs.rev_suffix }}
 
       - name: Create and push Git tag
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
-          GIT_TAG="${{ inputs.app_name }}-${{ steps.extract_version.outputs.app_full_version }}-${{ inputs.distro_version }}"
+          GIT_TAG="${{ inputs.app_name }}-${{ steps.extract_version.outputs.app_full_version }}-${{ inputs.distro_version }}${{ steps.compute_revision.outputs.rev_suffix }}"
           echo "Creating git tag: $GIT_TAG"
           git tag "$GIT_TAG"
           git push origin "$GIT_TAG"
